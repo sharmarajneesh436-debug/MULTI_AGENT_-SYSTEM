@@ -1,7 +1,8 @@
 import streamlit as st
 import time
-from agents import build_reader_agent, build_search_agent, writer_chain, critic_chain
-
+from agents import writer_chain, critic_chain
+from tools import web_search, scrape_url
+import re
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="ResearchMind · AI Research Agent",
@@ -294,16 +295,48 @@ details summary {
 
 
 # ── Helper: render a step card ────────────────────────────────────────────────
+# def step_card(num: str, title: str, state: str, desc: str = ""):
+#     status_map = {
+#         "waiting": ("WAITING", "status-waiting"),
+#         "running": ("● RUNNING", "status-running"),
+#         "done": ("✓ DONE", "status-done"),
+#     }
+
+#     # def extract_first_url(text: str):
+#     #  urls = re.findall(r"https?://[^\s]+", text)
+#     # return urls[0] if urls else None
+
+#     _, cls = status_map.get(state, ("", ""))
+#     card_cls = {"running": "active", "done": "done"}.get(state, "")
+
+#     label, _ = status_map.get(state, ("", ""))
+
+#     st.markdown(
+#         f"""
+#     <div class="step-card {card_cls}">
+#         <div class="step-header">
+#             <span class="step-num">{num}</span>
+#             <span class="step-title">{title}</span>
+#             <span class="step-status {cls}">{label}</span>
+#         </div>
+#         {"<div style='font-size:0.82rem;color:#706860;margin-top:0.3rem;'>" + desc + "</div>" if desc else ""}
+#     </div>
+#     """,
+#         unsafe_allow_html=True,
+#     )
+#     def extract_first_url(text: str):
+#      urls = re.findall(r"https?://[^\s]+", text)
+#     return urls[0] if urls else None
+
 def step_card(num: str, title: str, state: str, desc: str = ""):
     status_map = {
         "waiting": ("WAITING", "status-waiting"),
         "running": ("● RUNNING", "status-running"),
         "done": ("✓ DONE", "status-done"),
     }
-    _, cls = status_map.get(state, ("", ""))
-    card_cls = {"running": "active", "done": "done"}.get(state, "")
 
-    label, _ = status_map.get(state, ("", ""))
+    label, cls = status_map.get(state, ("", ""))
+    card_cls = {"running": "active", "done": "done"}.get(state, "")
 
     st.markdown(
         f"""
@@ -320,6 +353,9 @@ def step_card(num: str, title: str, state: str, desc: str = ""):
     )
 
 
+def extract_first_url(text: str):
+    urls = re.findall(r"https?://[^\s]+", text)
+    return urls[0] if urls else None
 # ── Session state init ────────────────────────────────────────────────────────
 for key in ("results", "running", "done"):
     if key not in st.session_state:
@@ -408,6 +444,7 @@ with col_pipeline:
 
 
 # ── Run pipeline ──────────────────────────────────────────────────────────────
+# ── Run pipeline ──────────────────────────────────────────────────────────────
 if run_btn:
     if not topic.strip():
         st.warning("Please enter a research topic first.")
@@ -417,66 +454,50 @@ if run_btn:
         st.session_state.done = False
         st.rerun()
 
+
 if st.session_state.running and not st.session_state.done:
     results = {}
-    topic_val = st.session_state.topic_input
+    topic_val = st.session_state.topic_input.strip()
 
     try:
-        # ── Step 1: Search ──
-        with st.spinner("🔍  Search Agent is working…"):
-            search_agent = build_search_agent()
-            sr = search_agent.invoke(
-                {
-                    "messages": [
-                        (
-                            "user",
-                            f"Find recent, reliable and detailed information about: {topic_val}",
-                        )
-                    ]
-                }
-            )
-            results["search"] = sr["messages"][-1].content
+        # Step 1: Search directly using Tavily tool
+        with st.spinner("🔍 Search is working…"):
+            results["search"] = web_search.invoke({
+                "query": f"{topic_val} recent reliable detailed information"
+            })
             st.session_state.results = dict(results)
 
-        # ── Step 2: Reader ──
-        with st.spinner("📄  Reader Agent is scraping top resources…"):
-            reader_agent = build_reader_agent()
-            rr = reader_agent.invoke(
-                {
-                    "messages": [
-                        (
-                            "user",
-                            f"Based on the following search results about '{topic_val}', "
-                            f"pick the most relevant URL and scrape it for deeper content.\n\n"
-                            f"Search Results:\n{results['search'][:800]}",
-                        )
-                    ]
-                }
-            )
-            results["reader"] = rr["messages"][-1].content
+        # Step 2: Scrape directly using scrape_url tool
+        with st.spinner("📄 Scraping top resource…"):
+            top_url = extract_first_url(results["search"])
+
+            if top_url:
+                results["reader"] = scrape_url.invoke({"url": top_url})
+            else:
+                results["reader"] = "No URL found for scraping."
+
             st.session_state.results = dict(results)
 
-        # ── Step 3: Writer ──
-        with st.spinner("✍️  Writer is drafting the report…"):
+        # Step 3: Writer
+        with st.spinner("✍️ Writer is drafting the report…"):
             research_combined = (
                 f"SEARCH RESULTS:\n{results['search']}\n\n"
                 f"DETAILED SCRAPED CONTENT:\n{results['reader']}"
             )
-            results["writer"] = writer_chain.invoke(
-                {
-                    "topic": topic_val,
-                    "research": research_combined,
-                }
-            )
+
+            results["writer"] = writer_chain.invoke({
+                "topic": topic_val,
+                "research": research_combined
+            })
+
             st.session_state.results = dict(results)
 
-        # ── Step 4: Critic ──
-        with st.spinner("🧐  Critic is reviewing the report…"):
-            results["critic"] = critic_chain.invoke(
-                {
-                    "report": results["writer"],
-                }
-            )
+        # Step 4: Critic
+        with st.spinner("🧐 Critic is reviewing the report…"):
+            results["critic"] = critic_chain.invoke({
+                "report": results["writer"]
+            })
+
             st.session_state.results = dict(results)
 
         st.session_state.running = False
